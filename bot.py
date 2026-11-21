@@ -22,7 +22,6 @@ if not GROQ_API_KEY:
 
 AI_CHANNEL_ID = int(AI_CHANNEL_ID) if AI_CHANNEL_ID else None
 
-# ตั้งค่า Groq Client (ใช้ OpenAI library เพราะรองรับกัน)
 client = AsyncOpenAI(
     api_key=GROQ_API_KEY,
     base_url="https://api.groq.com/openai/v1"
@@ -66,20 +65,39 @@ async def on_ready():
         print(f"[ข้อผิดพลาด] ซิงค์คำสั่งไม่สำเร็จ: {e}")
 
 async def ask_ai(question: str) -> str:
-    try:
-        response = await client.chat.completions.create(
-            model="llama-3.3-70b-versatile", # โมเดลที่ฉลาดและเร็วมาก
-            messages=[
-                {"role": "system", "content": build_system_prompt()},
-                {"role": "user", "content": question}
-            ],
-            temperature=0.7,
-            max_tokens=1000
-        )
-        return response.choices[0].message.content
-    except Exception as e:
-        print(f"[Debug] AI Error: {str(e)}")
-        raise Exception("ไม่สามารถประมวลผลคำตอบได้ในขณะนี้")
+    # รายชื่อโมเดล Groq ที่มีอยู่จริง (พฤศจิกายน 2026)
+    models_to_try = [
+        "llama-3.3-70b-specdec",
+        "llama-3.1-70b-versatile",
+        "llama3-70b-8192",
+        "llama-3.1-8b-instant",
+        "mixtral-8x7b-32768"
+    ]
+    
+    for model in models_to_try:
+        try:
+            print(f"[Debug] ลองโมเดล: {model}")
+            response = await client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": build_system_prompt()},
+                    {"role": "user", "content": question}
+                ],
+                temperature=0.7,
+                max_tokens=1000
+            )
+            print(f"[Debug] โมเดล {model} สำเร็จ")
+            return response.choices[0].message.content
+        except Exception as e:
+            error_msg = str(e)
+            print(f"[Debug] {model} error: {error_msg[:150]}")
+            # ถ้าเป็น 404 (โมเดลไม่มี) ให้ลองตัวถัดไป
+            if "404" in error_msg or "does not exist" in error_msg:
+                continue
+            # ถ้าเป็น error อื่น ให้ raise
+            raise
+    
+    raise Exception("ไม่มีโมเดลที่ใช้งานได้")
 
 async def process_and_reply(channel, target_message, question, use_reply=False):
     async with channel.typing():
