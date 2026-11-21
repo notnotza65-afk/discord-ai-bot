@@ -57,10 +57,11 @@ async def on_ready():
 
 async def ask_gemini(question: str, max_retries: int = 3) -> str:
     models_to_try = [
-        "gemini-1.5-flash",
-        "gemini-2.0-flash-lite",
-        "gemini-3.8-flash"
-    ]
+    "gemini-3.8-flash",
+    "gemini-2.5-pro",
+    "gemini-1.5-pro",
+    "gemini-pro"
+]
     
     for model_name in models_to_try:
         for attempt in range(max_retries):
