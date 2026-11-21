@@ -1,34 +1,53 @@
 import os
-import time
+import asyncio
+from datetime import datetime
+from zoneinfo import ZoneInfo
 import discord
 from discord import app_commands
 from discord.ext import commands
-from google import genai
-from google.genai import types
+from openai import AsyncOpenAI
 from dotenv import load_dotenv
 
 load_dotenv()
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 AI_CHANNEL_ID = os.getenv("AI_CHANNEL_ID")
 
 if not DISCORD_TOKEN:
     print("[ข้อผิดพลาด] ไม่พบ DISCORD_TOKEN")
     exit()
-if not GEMINI_API_KEY:
-    print("[ข้อผิดพลาด] ไม่พบ GEMINI_API_KEY")
+if not GROQ_API_KEY:
+    print("[ข้อผิดพลาด] ไม่พบ GROQ_API_KEY")
     exit()
 
 AI_CHANNEL_ID = int(AI_CHANNEL_ID) if AI_CHANNEL_ID else None
 
-client = genai.Client(api_key=GEMINI_API_KEY)
+# ตั้งค่า Groq Client (ใช้ OpenAI library เพราะรองรับกัน)
+client = AsyncOpenAI(
+    api_key=GROQ_API_KEY,
+    base_url="https://api.groq.com/openai/v1"
+)
 
-SYSTEM_PROMPT = """คุณคือผู้ช่วย AI อัจฉริยะและเป็นมิตรในเซิร์ฟเวอร์ Discord
-- คุณสามารถค้นหาข้อมูลจากอินเทอร์เน็ตได้ เพื่อให้ข้อมูลที่เป็นปัจจุบันและถูกต้อง
-- ตอบคำถามให้ตรงประเด็น เป็นธรรมชาติ และอ่านง่าย
-- ใช้ภาษาไทยที่สุภาพและเป็นกันเอง
-- หากเป็นคำถามทั่วไป ให้ตอบทันทีอย่างมั่นใจ ไม่ต้องปฏิเสธ
-- จัดรูปแบบข้อความให้อ่านง่าย"""
+DAY_TH = ["จันทร์", "อังคาร", "พุธ", "พฤหัสบดี", "ศุกร์", "เสาร์", "อาทิตย์"]
+MONTH_TH = ["มกราคม", "กุมภาพันธ์", "มีนาคม", "เมษายน", "พฤษภาคม", "มิถุนายน",
+            "กรกฎาคม", "สิงหาคม", "กันยายน", "ตุลาคม", "พฤศจิกายน", "ธันวาคม"]
+
+def get_current_time_th():
+    now = datetime.now(ZoneInfo("Asia/Bangkok"))
+    return f"วันนี้คือวัน{DAY_TH[now.weekday()]}ที่ {now.day} {MONTH_TH[now.month - 1]} พ.ศ. {now.year + 543} เวลา {now.strftime('%H:%M')} น. (เวลาประเทศไทย)"
+
+def build_system_prompt():
+    return f"""คุณคือผู้ช่วย AI อัจฉริยะ รวดเร็ว และเป็นมิตรในเซิร์ฟเวอร์ Discord
+
+ข้อมูลความจริงปัจจุบัน (ใช้อ้างอิงเสมอ):
+- {get_current_time_th()}
+
+กฎการตอบ:
+1. ใช้ภาษาไทยที่สละสลวย สุภาพ เป็นธรรมชาติ และอ่านง่าย
+2. ห้ามใช้อิโมจิ หรือสัญลักษณ์ตกแต่งใดๆ
+3. ตอบให้ตรงประเด็น กระชับ และถูกต้อง
+4. หากถูกถามเรื่องวัน เวลา หรือข้อมูลปัจจุบัน ให้ตอบจากข้อมูลข้างต้นทันที
+5. จัดรูปแบบข้อความให้อ่านง่าย (ใช้ตัวหนา หรือขึ้นบรรทัดใหม่เมื่อจำเป็น)"""
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -36,110 +55,81 @@ intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-
 @bot.event
 async def on_ready():
     print(f"[ระบบ] บอท {bot.user.name} เชื่อมต่อสำเร็จ")
-    print(f"[ระบบ] ID: {bot.user.id}")
+    print(f"[ระบบ] เวลาปัจจุบัน: {get_current_time_th()}")
     try:
         synced = await bot.tree.sync()
-        print(f"[ระบบ] ซิงค์คำสั่ง Slash แล้ว {len(synced)} คำสั่ง")
+        print(f"[ระบบ] ซิงค์คำสั่ง {len(synced)} คำสั่ง")
     except Exception as e:
         print(f"[ข้อผิดพลาด] ซิงค์คำสั่งไม่สำเร็จ: {e}")
 
+async def ask_ai(question: str) -> str:
+    try:
+        response = await client.chat.completions.create(
+            model="llama-3.3-70b-versatile", # โมเดลที่ฉลาดและเร็วมาก
+            messages=[
+                {"role": "system", "content": build_system_prompt()},
+                {"role": "user", "content": question}
+            ],
+            temperature=0.7,
+            max_tokens=1000
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        print(f"[Debug] AI Error: {str(e)}")
+        raise Exception("ไม่สามารถประมวลผลคำตอบได้ในขณะนี้")
 
-async def ask_gemini(question: str, max_retries: int = 2) -> str:
-    models_to_try = ["gemini-2.0-flash", "gemini-1.5-flash"]
+async def process_and_reply(channel, target_message, question, use_reply=False):
+    async with channel.typing():
+        try:
+            answer = await ask_ai(question)
+            if len(answer) > 1990:
+                answer = answer[:1990] + "\n...(ข้อความถูกตัดเนื่องจากยาวเกิน)"
+            
+            if use_reply:
+                await target_message.reply(answer)
+            else:
+                await channel.send(answer)
+        except Exception as e:
+            error_msg = f"เกิดข้อผิดพลาด: {e}"
+            if use_reply:
+                await target_message.reply(error_msg)
+            else:
+                await channel.send(error_msg)
 
-    for model_name in models_to_try:
-        for attempt in range(max_retries):
-            try:
-                print(f"[Debug] กำลังประมวลผลด้วย {model_name}...")
-                config = types.GenerateContentConfig(
-                    system_instruction=SYSTEM_PROMPT,
-                    tools=[types.Tool(google_search=types.GoogleSearch())]
-                )
-                # ใช้ client.aio = async ไม่บล็อก event loop
-                response = await client.aio.models.generate_content(
-                    model=model_name,
-                    contents=question,
-                    config=config
-                )
-                print(f"[Debug] ตอบสำเร็จ")
-                return response.text
-
-            except Exception as e:
-                error_msg = str(e)
-                print(f"[Debug] {model_name} error: {error_msg[:150]}")
-                if "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg:
-                    break
-                elif "404" in error_msg or "NOT_FOUND" in error_msg:
-                    break
-                elif "503" in error_msg or "UNAVAILABLE" in error_msg:
-                    if attempt < max_retries - 1:
-                        await asyncio_sleep(5 * (attempt + 1))
-                        continue
-                else:
-                    raise
-
-    raise Exception("ไม่สามารถประมวลผลได้ในขณะนี้")
-
-
-async def asyncio_sleep(seconds):
-    import asyncio
-    await asyncio.sleep(seconds)
-
-
+# --- Slash Commands ---
 @bot.tree.command(name="ask", description="ถามความรู้ทั่วไป")
 @app_commands.describe(question="คำถามที่ต้องการถาม")
 async def ask_slash(interaction: discord.Interaction, question: str):
     await interaction.response.defer()
     try:
-        answer = await ask_gemini(question)
-        if len(answer) > 1990:
-            answer = answer[:1990] + "\n...(ข้อความถูกตัด)"
-        await interaction.followup.send(content=answer)
+        answer = await ask_ai(question)
+        await interaction.followup.send(answer)
     except Exception as e:
-        await interaction.followup.send(content=f"เกิดข้อผิดพลาด: {e}")
-
+        await interaction.followup.send(f"เกิดข้อผิดพลาด: {e}")
 
 @bot.tree.command(name="chat", description="คุยเล่นกับบอท")
 @app_commands.describe(message="ข้อความที่ต้องการคุย")
 async def chat_slash(interaction: discord.Interaction, message: str):
     await interaction.response.defer()
     try:
-        answer = await ask_gemini(message)
-        if len(answer) > 1990:
-            answer = answer[:1990] + "\n...(ข้อความถูกตัด)"
-        await interaction.followup.send(content=answer)
+        answer = await ask_ai(message)
+        await interaction.followup.send(answer)
     except Exception as e:
-        await interaction.followup.send(content=f"เกิดข้อผิดพลาด: {e}")
+        await interaction.followup.send(f"เกิดข้อผิดพลาด: {e}")
 
+# --- Prefix Commands ---
+@bot.command(name="ai")
+async def ai_command(ctx, *, question: str):
+    await process_and_reply(ctx.channel, ctx.message, question, use_reply=True)
 
-@bot.command(name="ai", help="ถามบอท AI")
-async def ai_command(ctx: commands.Context, *, question: str):
-    try:
-        async with ctx.typing():
-            answer = await ask_gemini(question)
-            if len(answer) > 1990:
-                answer = answer[:1990] + "\n...(ข้อความถูกตัด)"
-            await ctx.reply(answer)
-    except Exception as e:
-        await ctx.reply(f"เกิดข้อผิดพลาด: {e}")
+@bot.command(name="chat")
+async def chat_command(ctx, *, message: str):
+    await process_and_reply(ctx.channel, ctx.message, message, use_reply=True)
 
-
-@bot.command(name="chat", help="คุยเล่นกับบอท")
-async def chat_command(ctx: commands.Context, *, message: str):
-    try:
-        async with ctx.typing():
-            answer = await ask_gemini(message)
-            if len(answer) > 1990:
-                answer = answer[:1990] + "\n...(ข้อความถูกตัด)"
-            await ctx.reply(answer)
-    except Exception as e:
-        await ctx.reply(f"เกิดข้อผิดพลาด: {e}")
-
-
+# --- Auto Reply Event ---
 @bot.event
 async def on_message(message: discord.Message):
     if message.author == bot.user or message.author.bot:
@@ -153,7 +143,7 @@ async def on_message(message: discord.Message):
         await bot.process_commands(message)
         return
 
-    is_ai_channel = (AI_CHANNEL_ID is not None and message.channel.id == AI_CHANNEL_ID)
+    is_ai_channel = AI_CHANNEL_ID and message.channel.id == AI_CHANNEL_ID
     is_mentioned = bot.user in message.mentions
 
     if not (is_ai_channel or is_mentioned):
@@ -167,26 +157,7 @@ async def on_message(message: discord.Message):
         await bot.process_commands(message)
         return
 
-    print(f"[Debug] {'ห้อง AI' if is_ai_channel else 'ถูกแท็ก'} โดย {message.author}: {content}")
-
-    try:
-        async with message.channel.typing():
-            answer = await ask_gemini(content)
-            if len(answer) > 1990:
-                answer = answer[:1990] + "\n...(ข้อความถูกตัด)"
-
-            if is_ai_channel:
-                await message.channel.send(answer)
-            else:
-                await message.reply(answer)
-    except Exception as e:
-        print(f"[Debug] Error: {e}")
-        try:
-            await message.channel.send(f"เกิดข้อผิดพลาด: {e}")
-        except:
-            pass
-
+    await process_and_reply(message.channel, message, content, use_reply=not is_ai_channel)
     await bot.process_commands(message)
-
 
 bot.run(DISCORD_TOKEN, reconnect=True)
