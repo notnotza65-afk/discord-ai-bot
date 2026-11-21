@@ -66,7 +66,8 @@ async def ask_ai(q: str) -> str:
         
         print(f"[AI] กำลังถาม OpenRouter...")
         r = await client.chat.completions.create(
-            model="meta-llama/llama-3.1-8b-instruct:free",
+            # เปลี่ยนเป็นโมเดลฟรีที่เสถียรที่สุดในขณะนี้
+            model="qwen/qwen-2.5-72b-instruct:free",
             messages=[
                 {"role": "system", "content": full_prompt},
                 {"role": "user", "content": q}
@@ -120,7 +121,7 @@ async def ai_cmd(ctx, *, q: str):
 @bot.command(name="test")
 async def test_cmd(ctx):
     try:
-        await ctx.send("บอททำงานปกติ!")
+        await ctx.send("บอททำงานปกติ! พร้อมตอบคำถามแล้ว")
     except Exception as e:
         print(f"[Test ERROR] {e}")
 
