@@ -33,50 +33,41 @@ MONTH_TH = ["มกราคม", "กุมภาพันธ์", "มีน�
 
 def get_current_time_th():
     now = datetime.now(ZoneInfo("Asia/Bangkok"))
-    return f"วันนี้คือวัน{DAY_TH[now.weekday()]}ที่ {now.day} {MONTH_TH[now.month - 1]} พ.ศ. {now.year + 543} เวลา {now.strftime('%H:%M')} น. (เวลาประเทศไทย)"
+    return f"วันนี้คือวัน{DAY_TH[now.weekday()]}ที่ {now.day} {MONTH_TH[now.month - 1]} พ.ศ. {now.year + 543} เวลา {now.strftime('%H:%M')} น."
 
 def build_system_prompt():
-    return f"""คุณคือผู้ช่วย AI อัจฉริยะ รวดเร็ว และเป็นมิตรในเซิร์ฟเวอร์ Discord
-
-ข้อมูลความจริงปัจจุบัน (ใช้อ้างอิงเสมอ):
-- {get_current_time_th()}
-
-กฎการตอบ:
-1. ใช้ภาษาไทยที่สละสลวย สุภาพ เป็นธรรมชาติ และอ่านง่าย
-2. ห้ามใช้อิโมจิ หรือสัญลักษณ์ตกแต่งใดๆ
-3. ตอบให้ตรงประเด็น กระชับ และถูกต้อง
-4. หากถูกถามเรื่องวัน เวลา หรือข้อมูลปัจจุบัน ให้ตอบจากข้อมูลข้างต้นทันที
-5. จัดรูปแบบข้อความให้อ่านง่าย (ใช้ตัวหนา หรือขึ้นบรรทัดใหม่เมื่อจำเป็น)"""
+    return f"""คุณคือผู้ช่วย AI ในเซิร์ฟเวอร์ Discord
+ข้อมูลปัจจุบัน: {get_current_time_th()}
+กฎ: ใช้ภาษาไทยสุภาพ เป็นธรรมชาติ ห้ามใช้อิโมจิ ตอบตรงประเด็น"""
 
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
+intents.guilds = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 @bot.event
 async def on_ready():
     print(f"[ระบบ] บอท {bot.user.name} เชื่อมต่อสำเร็จ")
-    print(f"[ระบบ] เวลาปัจจุบัน: {get_current_time_th()}")
+    print(f"[ระบบ] {get_current_time_th()}")
     try:
         synced = await bot.tree.sync()
-        print(f"[ระบบ] ซิงค์คำสั่ง {len(synced)} คำสั่ง")
+        print(f"[ระบบ] ซิงค์ {len(synced)} คำสั่ง")
     except Exception as e:
-        print(f"[ข้อผิดพลาด] ซิงค์คำสั่งไม่สำเร็จ: {e}")
+        print(f"[ข้อผิดพลาด] {e}")
 
 async def ask_ai(question: str) -> str:
-    # รายชื่อโมเดล Groq ที่มีอยู่จริง (พฤศจิกายน 2026)
     models_to_try = [
         "llama-3.3-70b-specdec",
         "llama-3.1-70b-versatile",
-        "llama3-70b-8192",
         "llama-3.1-8b-instant",
         "mixtral-8x7b-32768"
     ]
     
     for model in models_to_try:
         try:
-            print(f"[Debug] ลองโมเดล: {model}")
+            print(f"[Debug] ลอง: {model}")
             response = await client.chat.completions.create(
                 model=model,
                 messages=[
@@ -86,40 +77,36 @@ async def ask_ai(question: str) -> str:
                 temperature=0.7,
                 max_tokens=1000
             )
-            print(f"[Debug] โมเดล {model} สำเร็จ")
+            print(f"[Debug] {model} สำเร็จ")
             return response.choices[0].message.content
         except Exception as e:
-            error_msg = str(e)
-            print(f"[Debug] {model} error: {error_msg[:150]}")
-            # ถ้าเป็น 404 (โมเดลไม่มี) ให้ลองตัวถัดไป
-            if "404" in error_msg or "does not exist" in error_msg:
+            msg = str(e)
+            print(f"[Debug] {model} error: {msg[:150]}")
+            if "404" in msg or "does not exist" in msg:
                 continue
-            # ถ้าเป็น error อื่น ให้ raise
             raise
     
     raise Exception("ไม่มีโมเดลที่ใช้งานได้")
 
-async def process_and_reply(channel, target_message, question, use_reply=False):
-    async with channel.typing():
+async def send_answer(channel, question):
+    print(f"[Debug] กำลังถาม AI: {question}")
+    try:
+        answer = await ask_ai(question)
+        print(f"[Debug] ได้คำตอบ ความยาว {len(answer)}")
+        if len(answer) > 1990:
+            answer = answer[:1990] + "\n...(ข้อความถูกตัด)"
+        await channel.send(answer)
+        print(f"[Debug] ส่งข้อความสำเร็จ")
+    except Exception as e:
+        print(f"[Debug] Error: {e}")
         try:
-            answer = await ask_ai(question)
-            if len(answer) > 1990:
-                answer = answer[:1990] + "\n...(ข้อความถูกตัดเนื่องจากยาวเกิน)"
-            
-            if use_reply:
-                await target_message.reply(answer)
-            else:
-                await channel.send(answer)
-        except Exception as e:
-            error_msg = f"เกิดข้อผิดพลาด: {e}"
-            if use_reply:
-                await target_message.reply(error_msg)
-            else:
-                await channel.send(error_msg)
+            await channel.send(f"เกิดข้อผิดพลาด: {e}")
+            print(f"[Debug] ส่ง error message สำเร็จ")
+        except Exception as e2:
+            print(f"[Debug] ส่ง error message ไม่สำเร็จ: {e2}")
 
-# --- Slash Commands ---
 @bot.tree.command(name="ask", description="ถามความรู้ทั่วไป")
-@app_commands.describe(question="คำถามที่ต้องการถาม")
+@app_commands.describe(question="คำถาม")
 async def ask_slash(interaction: discord.Interaction, question: str):
     await interaction.response.defer()
     try:
@@ -129,7 +116,7 @@ async def ask_slash(interaction: discord.Interaction, question: str):
         await interaction.followup.send(f"เกิดข้อผิดพลาด: {e}")
 
 @bot.tree.command(name="chat", description="คุยเล่นกับบอท")
-@app_commands.describe(message="ข้อความที่ต้องการคุย")
+@app_commands.describe(message="ข้อความ")
 async def chat_slash(interaction: discord.Interaction, message: str):
     await interaction.response.defer()
     try:
@@ -138,44 +125,45 @@ async def chat_slash(interaction: discord.Interaction, message: str):
     except Exception as e:
         await interaction.followup.send(f"เกิดข้อผิดพลาด: {e}")
 
-# --- Prefix Commands ---
 @bot.command(name="ai")
 async def ai_command(ctx, *, question: str):
-    await process_and_reply(ctx.channel, ctx.message, question, use_reply=True)
+    print(f"[Debug] !ai โดย {ctx.author}: {question}")
+    await send_answer(ctx.channel, question)
 
 @bot.command(name="chat")
 async def chat_command(ctx, *, message: str):
-    await process_and_reply(ctx.channel, ctx.message, message, use_reply=True)
+    print(f"[Debug] !chat โดย {ctx.author}: {message}")
+    await send_answer(ctx.channel, message)
 
-# --- Auto Reply Event ---
 @bot.event
 async def on_message(message: discord.Message):
     if message.author == bot.user or message.author.bot:
         return
-
+    
     content = message.content.strip()
     if not content:
         return
-
+    
     if content.lower().startswith(("!ai ", "!chat ", "!ask ")):
         await bot.process_commands(message)
         return
-
+    
     is_ai_channel = AI_CHANNEL_ID and message.channel.id == AI_CHANNEL_ID
     is_mentioned = bot.user in message.mentions
-
+    
     if not (is_ai_channel or is_mentioned):
         await bot.process_commands(message)
         return
-
+    
     if is_mentioned:
         content = content.replace(f"<@{bot.user.id}>", "").strip()
-
+    
     if not content:
         await bot.process_commands(message)
         return
-
-    await process_and_reply(message.channel, message, content, use_reply=not is_ai_channel)
+    
+    print(f"[Debug] on_message: {content}")
+    await send_answer(message.channel, content)
     await bot.process_commands(message)
 
 bot.run(DISCORD_TOKEN, reconnect=True)
