@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 load_dotenv()
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")   # ไม่บังคับ: มีแล้วค้นเว็บทั่วไปแม่นขึ้น
 AI_CHANNEL_ID = os.getenv("AI_CHANNEL_ID")
 
 if not DISCORD_TOKEN or not OPENROUTER_API_KEY:
@@ -30,6 +30,7 @@ client = AsyncOpenAI(
     default_headers={"HTTP-Referer": "https://discord.com", "X-Title": "Discord AI Bot"}
 )
 
+# ---------- สถานะส่วนกลาง ----------
 CURRENT_MODEL = None
 FREE_LIST = []
 FALLBACK = ["qwen/qwen-2.5-72b-instruct:free", "google/gemma-2-9b-it:free",
@@ -37,6 +38,8 @@ FALLBACK = ["qwen/qwen-2.5-72b-instruct:free", "google/gemma-2-9b-it:free",
 LAST_SOURCE = "ยังไม่ได้ค้น"
 SEARCH_CACHE = {}
 CACHE_TTL = 600
+ANSWER_CACHE = {}
+ANSWER_TTL = 120
 
 DAY_TH = ["จันทร์", "อังคาร", "พุธ", "พฤหัสบดี", "ศุกร์", "เสาร์", "อาทิตย์"]
 MONTH_TH = ["มกราคม", "กุมภาพันธ์", "มีนาคม", "เมษายน", "พฤษภาคม", "มิถุนายน",
@@ -46,6 +49,7 @@ def get_time_th():
     now = datetime.now(ZoneInfo("Asia/Bangkok"))
     return f"วัน{DAY_TH[now.weekday()]}ที่ {now.day} {MONTH_TH[now.month-1]} พ.ศ. {now.year+543} เวลา {now.strftime('%H:%M')} น. (เวลาประเทศไทย)"
 
+# ---------- เลือกโมเดลฟรีอัตโนมัติ ----------
 async def resolve_free_model(force=False):
     global CURRENT_MODEL, FREE_LIST
     if CURRENT_MODEL and not force:
@@ -69,9 +73,11 @@ async def resolve_free_model(force=False):
             return chosen
     except Exception as e:
         print(f"[คำเตือน] ดึงโมเดลไม่สำเร็จ: {e}")
-    CURRENT_MODEL = FALLBACK[0]
+    if not CURRENT_MODEL:
+        CURRENT_MODEL = FALLBACK[0]
     return CURRENT_MODEL
 
+# ---------- แหล่งค้นหาฟรี ----------
 async def search_tavily(q):
     async with httpx.AsyncClient(timeout=15) as h:
         r = await h.post("https://api.tavily.com/search",
@@ -111,7 +117,8 @@ async def search_web(q):
         LAST_SOURCE = hit[2] + " (แคช)"
         return hit[1]
     order = []
-    if TAVILY_API_KEY: order.append(("Tavily", search_tavily))
+    if TAVILY_API_KEY:
+        order.append(("Tavily", search_tavily))
     order += [("DuckDuckGo", search_ddg), ("Wikipedia", search_wiki)]
     for name, fn in order:
         try:
@@ -138,11 +145,16 @@ def needs_search(q: str) -> bool:
               "วันอะไร", "กี่โมง", "เวลาเท่าไหร่", "วันนี้วัน",
               "แต่ง", "กลอน", "เพลง", "ตลก", "มุก",
               "โค้ด", "code", "คำนวณ", "คณิต", "แปล", "translate"]
-    if any(p in ql for p in direct):
-        return False
-    return True
+    return not any(p in ql for p in direct)
 
+# ---------- ถาม AI พร้อมวนลองเมื่อ 429 ----------
 async def ask_ai(question):
+    global CURRENT_MODEL
+    ck = question.strip().lower()
+    hit = ANSWER_CACHE.get(ck)
+    if hit and time.time() - hit[0] < ANSWER_TTL:
+        return hit[1]
+
     if needs_search(question):
         results = await search_web(question)
         print(f"[ค้น] แหล่ง: {LAST_SOURCE} จำนวน {len(results)} ผล")
@@ -151,6 +163,7 @@ async def ask_ai(question):
     else:
         context = "คำถามนี้ตอบจากความรู้ของคุณโดยตรง ไม่ต้องอ้างอิงเว็บ"
         source_note = "ตอบจากความรู้ของคุณได้ทันที เป็นธรรมชาติ ไม่ต้องค้น"
+
     system = f"""คุณคือผู้ช่วย AI อัจฉริยะ ตอบได้ทุกเรื่อง
 เวลาปัจจุบัน: {get_time_th()}
 ข้อมูลอ้างอิง:
@@ -162,22 +175,41 @@ async def ask_ai(question):
 3. ถ้ามีลิงก์อ้างอิงที่ใช้จริง ให้ใส่ท้ายคำตอบ
 4. ถ้าถามวันเวลา ให้ตอบจากเวลาปัจจุบันทันที
 5. คุยเล่น สร้างสรรค์ โค้ด คณิต แปลภาษา ให้ตอบตรงๆ อย่างมั่นใจ"""
-    model = await resolve_free_model()
-    for _ in range(2):
+
+    await resolve_free_model()
+    ordered = []
+    if CURRENT_MODEL:
+        ordered.append(CURRENT_MODEL)
+    pool = FREE_LIST if FREE_LIST else FALLBACK
+    ordered += [m for m in pool if m != CURRENT_MODEL]
+
+    last_err = None
+    for i, model in enumerate(ordered[:8]):
         try:
             r = await client.chat.completions.create(
                 model=model,
                 messages=[{"role": "system", "content": system},
                           {"role": "user", "content": question}],
                 max_tokens=1200, temperature=0.6)
-            return r.choices[0].message.content
+            answer = r.choices[0].message.content
+            CURRENT_MODEL = model
+            ANSWER_CACHE[ck] = (time.time(), answer)
+            print(f"[สำเร็จ] โมเดล: {model}")
+            return answer
         except Exception as e:
             msg = str(e)
-            if "404" in msg or "model" in msg.lower() or "unavailable" in msg.lower():
-                model = await resolve_free_model(force=True); continue
+            last_err = e
+            print(f"[คำเตือน] {model}: {msg[:120]}")
+            if ("429" in msg or "rate" in msg.lower() or "Provider returned error" in msg
+                    or "503" in msg or "502" in msg):
+                await asyncio.sleep(1.5 + i)
+                continue
+            if "404" in msg or "unavailable" in msg.lower():
+                continue
             raise
-    raise Exception("ไม่มีโมเดลที่ใช้งานได้")
+    raise Exception(f"ผู้ให้บริการฟรีหนาแน่นชั่วคราว ลองแล้ว {len(ordered[:8])} โมเดล: {last_err}")
 
+# ---------- ตั้งค่าบอท ----------
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
@@ -187,6 +219,7 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 async def on_ready():
     try:
         print(f"[ระบบ] บอท {bot.user.name} ออนไลน์")
+        print(f"[ระบบ] เวลา: {get_time_th()}")
         await resolve_free_model()
         synced = await bot.tree.sync()
         print(f"[ระบบ] ซิงค์ {len(synced)} คำสั่ง พร้อมใช้งาน")
@@ -199,13 +232,18 @@ async def send_answer(channel, question):
         if len(answer) > 1990:
             answer = answer[:1990] + "\n...(ข้อความถูกตัด)"
         await channel.send(answer)
+    except discord.Forbidden:
+        print(f"[สิทธิ์] บอทไม่มีสิทธิ์ส่งในช่อง {channel.id} — เปิดสิทธิ์ Send Messages / View Channels ที่บทบาทบอทและสิทธิ์เฉพาะช่อง")
     except Exception as e:
         traceback.print_exc()
-        try: await channel.send(f"เกิดข้อผิดพลาด: {e}")
-        except Exception: pass
+        try:
+            await channel.send(f"เกิดข้อผิดพลาด: {e}")
+        except Exception:
+            pass
 
 @bot.command(name="test")
-async def test_cmd(ctx): await ctx.send("บอททำงานปกติ พร้อมค้นหาและตอบคำถาม")
+async def test_cmd(ctx):
+    await ctx.send("บอททำงานปกติ พร้อมค้นหาและตอบคำถาม")
 
 @bot.command(name="model")
 async def model_cmd(ctx):
@@ -218,10 +256,12 @@ async def sources_cmd(ctx):
     await ctx.send(f"แหล่งค้นล่าสุด: {LAST_SOURCE}\nTavily key: {have}\nลำดับค้น: Tavily (ถ้ามี) แล้ว DuckDuckGo แล้ว Wikipedia")
 
 @bot.command(name="ai")
-async def ai_cmd(ctx, *, question: str): await send_answer(ctx.channel, question)
+async def ai_cmd(ctx, *, question: str):
+    await send_answer(ctx.channel, question)
 
 @bot.command(name="chat")
-async def chat_cmd(ctx, *, message: str): await send_answer(ctx.channel, message)
+async def chat_cmd(ctx, *, message: str):
+    await send_answer(ctx.channel, message)
 
 @bot.tree.command(name="ai", description="ถามผู้ช่วย AI พร้อมค้นหาข้อมูลจริง")
 @app_commands.describe(question="คำถาม")
@@ -235,17 +275,21 @@ async def ai_slash(interaction: discord.Interaction, question: str):
 @bot.event
 async def on_message(m):
     try:
-        if m.author == bot.user or m.author.bot: return
+        if m.author == bot.user or m.author.bot:
+            return
         c = m.content.strip()
-        if not c: return
+        if not c:
+            return
         if c.lower().startswith(("!ai ", "!chat ", "!test", "!model", "!sources")):
             await bot.process_commands(m); return
         is_ai = AI_CHANNEL_ID and m.channel.id == AI_CHANNEL_ID
         is_tag = bot.user in m.mentions
         if not (is_ai or is_tag):
             await bot.process_commands(m); return
-        if is_tag: c = c.replace(f"<@{bot.user.id}>", "").strip()
-        if not c: return
+        if is_tag:
+            c = c.replace(f"<@{bot.user.id}>", "").strip()
+        if not c:
+            return
         await send_answer(m.channel, c)
         await bot.process_commands(m)
     except Exception:
